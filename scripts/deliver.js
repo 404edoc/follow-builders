@@ -20,12 +20,11 @@
 //   - "stdout" (default): just prints to terminal
 // ============================================================================
 
-import { readFile, appendFile, writeFile } from 'fs/promises';
+import { readFile, appendFile, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
 import { homedir } from 'os';
 import { config as loadEnv } from 'dotenv';
-import { execFileSync } from 'child_process';
 
 // -- Constants ---------------------------------------------------------------
 
@@ -61,12 +60,7 @@ async function getDigestText() {
 
 // -- Telegram Delivery -------------------------------------------------------
 
-// Sends the digest via Telegram Bot API.
-// The user creates a bot via @BotFather and provides the token.
-// The chat ID is obtained when the user sends their first message to the bot.
 async function sendTelegram(text, botToken, chatId) {
-  // Telegram has a 4096 character limit per message.
-  // If the digest is longer, we split it into chunks.
   const MAX_LEN = 4000;
   const chunks = [];
   let remaining = text;
@@ -75,7 +69,6 @@ async function sendTelegram(text, botToken, chatId) {
       chunks.push(remaining);
       break;
     }
-    // Try to split at a newline near the limit
     let splitAt = remaining.lastIndexOf('\n', MAX_LEN);
     if (splitAt < MAX_LEN * 0.5) splitAt = MAX_LEN;
     chunks.push(remaining.slice(0, splitAt));
@@ -99,7 +92,6 @@ async function sendTelegram(text, botToken, chatId) {
 
     if (!res.ok) {
       const err = await res.json();
-      // If Markdown parsing fails, retry without parse_mode
       if (err.description && err.description.includes("can't parse")) {
         await fetch(
           `https://api.telegram.org/bot${botToken}/sendMessage`,
@@ -118,7 +110,6 @@ async function sendTelegram(text, botToken, chatId) {
       }
     }
 
-    // Small delay between chunks to avoid rate limiting
     if (chunks.length > 1) await new Promise(r => setTimeout(r, 500));
   }
 }
@@ -133,58 +124,27 @@ function getLocalDateString() {
   return `${year}-${month}-${day}`;
 }
 
-function runObsidian(args, vaultName) {
-  const finalArgs = [];
-  finalArgs.push(...args);
-  if (vaultName) finalArgs.push(vaultName);
-  finalArgs.push('--silent');
-  const obsidianPath = '/Applications/Obsidian.app/Contents/MacOS/obsidian';
-  return execFileSync(obsidianPath, finalArgs, { encoding: 'utf-8' });
-}
-
-// Appends the digest to today's Daily note using Obsidian CLI
 async function saveToObsidian(text, obsidianConfig) {
   const date = getLocalDateString();
   const dailyDir = obsidianConfig.dailyDir || 'Daily';
   const sectionTitle = obsidianConfig.sectionTitle || 'AI Builders Digest';
-  const vaultName = obsidianConfig.vaultName;
   const vaultPath = obsidianConfig.vaultPath;
-  const dailyNotePath = `${dailyDir}/${date}.md`;
 
   if (!vaultPath) {
     throw new Error('Obsidian Vault path is not provided in config under obsidian.vaultPath');
   }
 
-  try {
-    // Construct full file path
-    const filePath = join(vaultPath, dailyDir, `${date}.md`);
+  const filePath = join(vaultPath, dailyDir, `${date}.md`);
+  await mkdir(dirname(filePath), { recursive: true });
 
-    // Check if file exists
-    if (!existsSync(filePath)) {
-      // File doesn't exist, create with daily command
-      runObsidian(['daily', 'create'], vaultName);
+  const content = `\n## ${sectionTitle}\n\n${text.trim()}\n`;
+  await appendFile(filePath, content, 'utf-8');
 
-      // Wait for file to be created (max 10 seconds)
-      for (let i = 0; i < 20; i++) {
-        await new Promise(r => setTimeout(r, 500));
-        if (existsSync(filePath)) break;
-      }
-    }
-
-    // Append the digest content
-    const content = `\n## ${sectionTitle}\n\n${text}\n`;
-    runObsidian(['append', `file=${dailyNotePath}`, `content=${content}`], vaultName);
-
-    return dailyNotePath;
-  } catch (err) {
-    throw new Error(`Failed to save to Obsidian: ${err.message}`);
-  }
+  return filePath;
 }
 
 // -- Email Delivery (Resend) -------------------------------------------------
 
-// Sends the digest via Resend's email API.
-// The user provides their own Resend API key and email address.
 async function sendEmail(text, apiKey, toEmail) {
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
@@ -211,7 +171,6 @@ async function sendEmail(text, apiKey, toEmail) {
 // -- Main --------------------------------------------------------------------
 
 async function main() {
-  // Load env and config
   loadEnv({ path: ENV_PATH });
 
   let config = {};
@@ -273,13 +232,17 @@ async function main() {
       }
 
       case 'stdout':
-      default:
+      default: {
+        let savedPath;
         if (obsidian.enabled) {
-          await saveToObsidian(digestText, obsidian);
+          savedPath = await saveToObsidian(digestText, obsidian);
         }
-        // Just print to terminal — the agent or OpenClaw handles delivery
+        if (savedPath) {
+          console.error(JSON.stringify({ status: 'ok', method: 'stdout', savedTo: savedPath }));
+        }
         console.log(digestText);
         break;
+      }
     }
   } catch (err) {
     console.log(JSON.stringify({

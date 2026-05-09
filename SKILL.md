@@ -129,10 +129,10 @@ Ask: "Do you also want each digest appended to your Obsidian Daily note?"
 If yes, ask: "What is the exact name of your Obsidian vault?"
 
 Once they provide the name, automatically find its absolute path by reading the Obsidian config file (e.g., `~/Library/Application Support/obsidian/obsidian.json` on macOS). You can use a quick Node command:
-\`\`\`bash
+```bash
 node -e "const fs = require('fs'); const config = JSON.parse(fs.readFileSync(process.env.HOME + '/Library/Application Support/obsidian/obsidian.json', 'utf-8')); const vaultName = '<USER_VAULT_NAME>'; const vault = Object.values(config.vaults).find(v => v.path.split('/').pop() === vaultName); if(vault) console.log(vault.path); else console.log('Not found');"
-\`\`\`
-If the path is found, ask the user to confirm: "I found your vault at \`<Vault Path>\`. Is this correct?"
+```
+If the path is found, ask the user to confirm: "I found your vault at `<Vault Path>`. Is this correct?"
 If not found, ask the user to manually provide the absolute path.
 
 Once verified and you have both the vault name and absolute path, set:
@@ -214,6 +214,7 @@ cat > ~/.follow-builders/config.json << 'CFGEOF'
     "dailyDir": "Daily",
     "sectionTitle": "AI Builders Digest"
   }
+}
 CFGEOF
 ```
 
@@ -451,6 +452,24 @@ If a user asks to add or remove sources, tell them: "The source list is curated
 centrally and updates automatically. If you'd like to suggest a source, you can
 open an issue at https://github.com/zarazhangrui/follow-builders."
 
+For **Hermes Agent local installations**, there is one important nuance:
+- Users may locally edit `~/.hermes/skills/follow-builders/config/default-sources.json`
+- `prepare-digest.js` can be patched to apply that local `x_accounts` list as a post-feed selection step
+- But this only filters or selects from accounts that already exist in the remote `feed-x.json`
+- It does **not** create new upstream feed data for handles missing from `feed-x.json`
+
+Pitfall:
+- If the user adds handles like `OpenAI` or `Codex_Changelog` locally, and the remote `feed-x.json` does not contain them, the final digest will still not include them
+- Resetting `~/.follow-builders/seen-content.json` does not solve this when the upstream feed itself lacks those accounts
+
+Verification sequence for local source additions:
+1. Check the remote `feed-x.json` first and confirm whether the requested handles are present
+2. If absent upstream, explain that local source edits alone cannot surface them
+3. Only if present upstream does local post-feed selection matter
+4. If the user truly needs missing handles, the remaining options are:
+   - modify the upstream feed generator to include them, or
+   - implement local direct-fetch logic for those handles in addition to the central feed
+
 ### Schedule Changes
 - "Switch to weekly/daily" → Update `frequency` in config.json
 - "Change time to X" → Update `deliveryTime` in config.json
@@ -489,6 +508,77 @@ Then edit `~/.follow-builders/prompts/<filename>.md` with the user's requested c
 After any configuration change, confirm what you changed.
 
 ---
+
+## Obsidian + Hermes cron on Hermes Agent
+
+When using this skill under **Hermes Agent** for an Obsidian-only workflow, do **not** follow the old "non-persistent agent → crontab or on-demand only" branch. Hermes Agent has its own durable scheduler.
+
+Use this branch instead:
+- Install the repository into `~/.hermes/skills/follow-builders`
+- Install `scripts/` dependencies with `npm install`
+- Keep runtime config in `~/.follow-builders/config.json`
+- Use `hermes cron create` or the `cronjob` tool for scheduling
+- The cron prompt should explicitly say:
+  - run `~/.hermes/skills/follow-builders/scripts/prepare-digest.js`
+  - if it returns the plain message `今天没有新的内容更新。`, stop and do not write placeholders
+  - otherwise generate the digest from the returned JSON only
+  - save markdown to a temp file
+  - call `~/.hermes/skills/follow-builders/scripts/deliver.js --file <tempfile>`
+
+For this user's preferred setup:
+- timezone: `Asia/Shanghai`
+- delivery time: `08:00`
+- Obsidian vault path: `/Users/agent/Library/CloudStorage/OneDrive-Personal/Obsidian/AlecObsidian`
+- content written to Obsidian must be real digest data, never mock/sample
+
+## Obsidian delivery pitfalls on macOS
+
+Do **not** rely on the Obsidian desktop binary as a CLI for daily-note creation or append during automation runs. On this machine, the durable fix was to write directly to the vault markdown file.
+
+Required behavior for `scripts/deliver.js` in this setup:
+- create the daily-note directory with `mkdir(dirname(filePath), { recursive: true })`
+- write to `vaultPath/Daily/YYYY-MM-DD.md` directly
+- when rerunning on the same day, replace the existing digest section or rewrite the daily note instead of blindly appending duplicate test/prod blocks
+- verify the written note by reading it back after delivery
+
+Formatting rules specific to this user's Obsidian workflow:
+- use a single final digest block per day; never leave both a test block and a formal block in the same note
+- links must remain directly clickable in Obsidian
+- prefer a natural note style over label-heavy output like `中文摘要：`
+- do **not** use button-style link text like `[点击查看原帖](...)`
+- instead, write the Chinese summary first and put the original URL on its own line
+- if keeping English source text for podcasts or transcripts, mark it explicitly as `节选` so it does not read like a broken Chinese summary
+
+## Content quality rules for Chinese digests
+
+When `config.language` is `zh`, the final digest should read like a native Chinese briefing, not a half-translated dump.
+
+Apply these rules:
+- Digest **summaries** and "今日重点" must be fully in Chinese
+- Keep English only for names, product names, and source links when needed
+- Do not use raw English tweet text as the body of a Chinese summary
+- "今日重点" should surface 2–4 synthesized conclusions, not a list of who posted what
+- If a tweet body is only a short link or too context-poor, keep it brief, but in "回归 skill 风格 / 尽量完整展开" mode do not aggressively filter it out; preserve coverage and group it under the correct builder
+- Prefer direct clickable URLs on their own line in the final Obsidian note for this user's workflow
+- Remove temporary/test digest content before writing the cleaned final version
+- If feed stats say there are 17 builders and 34 tweets, the written digest should try to cover those additions instead of collapsing them into a tiny hand-picked subset unless the user explicitly asks for a精选版
+- For pure-link or ultra-short posts, add a minimal grounded Chinese gloss when possible instead of leaving unexplained English fragments
+- In "完整展开 + 更中文化" mode, each builder should ideally start with a one-line Chinese overview before listing individual items
+- For light posts like pure links, quote-tweet reactions, or event invites, keep them but label them in Chinese as lightweight dynamics, link shares, or event reminders instead of dumping raw English
+- Podcast sections should lead with a Chinese导读; if English transcript text is retained, it must stay under a clearly marked `节选：` heading and should not dominate the section
+
+## Deduplication pitfall for podcasts
+
+`prepare-digest.js` may not always have a stable `videoId` field for podcast entries. If you only dedup on `videoId`, the seen-state file can end up with `videos.undefined` and future runs become unreliable.
+
+Use fallback identity fields for podcast deduplication:
+- first `videoId`
+- then `url`
+- then `title`
+
+If none are present, skip that item instead of writing an invalid seen key.
+
+- See `references/hermes-agent-obsidian-macos.md` for a verified Hermes Agent + Obsidian-on-macOS workflow, including the direct-file-write fix, podcast dedup pitfall, and the concrete cron job shape used in this environment.
 
 ## Manual Trigger
 

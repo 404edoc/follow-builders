@@ -26,6 +26,8 @@ import { homedir } from 'os';
 const USER_DIR = join(homedir(), '.follow-builders');
 const CONFIG_PATH = join(USER_DIR, 'config.json');
 const SEEN_PATH = join(USER_DIR, 'seen-content.json');
+const SCRIPT_DIR = decodeURIComponent(new URL('.', import.meta.url).pathname);
+const LOCAL_SOURCES_PATH = join(SCRIPT_DIR, '..', 'config', 'default-sources.json');
 
 const FEED_X_URL = 'https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-x.json';
 const FEED_PODCASTS_URL = 'https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-podcasts.json';
@@ -72,10 +74,41 @@ async function saveSeen(seen) {
   await writeFile(SEEN_PATH, JSON.stringify(seen, null, 2));
 }
 
-function filterNew(items, seenMap, idField) {
+async function loadLocalSources() {
+  if (!existsSync(LOCAL_SOURCES_PATH)) return null;
+  try {
+    return JSON.parse(await readFile(LOCAL_SOURCES_PATH, 'utf-8'));
+  } catch {
+    return null;
+  }
+}
+
+function applyLocalSourceSelection(feedX, localSources) {
+  if (!feedX?.x || !localSources?.x_accounts) return feedX;
+
+  const allowedHandles = new Set(
+    localSources.x_accounts
+      .map(account => account?.handle)
+      .filter(Boolean)
+      .map(handle => handle.toLowerCase())
+  );
+
+  const selected = feedX.x.filter(account => allowedHandles.has((account.handle || '').toLowerCase()));
+
+  return {
+    ...feedX,
+    x: selected
+  };
+}
+
+function filterNew(items, seenMap, idFields) {
+  const fields = Array.isArray(idFields) ? idFields : [idFields];
   const newItems = [];
   for (const item of items) {
-    const id = item[idField];
+    const id = fields.map(field => item?.[field]).find(value => value !== undefined && value !== null && value !== '');
+    if (!id) {
+      continue;
+    }
     if (!seenMap[id]) {
       newItems.push(item);
       seenMap[id] = Date.now();
@@ -105,13 +138,16 @@ async function main() {
 
   // 2. Load seen content
   const seen = await loadSeen();
+  const localSources = await loadLocalSources();
 
   // 3. Fetch all three feeds
-  const [feedX, feedPodcasts, feedBlogs] = await Promise.all([
+  let [feedX, feedPodcasts, feedBlogs] = await Promise.all([
     fetchJSON(FEED_X_URL),
     fetchJSON(FEED_PODCASTS_URL),
     fetchJSON(FEED_BLOGS_URL)
   ]);
+
+  feedX = applyLocalSourceSelection(feedX, localSources);
 
   if (!feedX) errors.push('Could not fetch tweet feed');
   if (!feedPodcasts) errors.push('Could not fetch podcast feed');
@@ -123,7 +159,7 @@ async function main() {
     tweets: filterNew(builder.tweets, seen.tweets, 'id')
   })).filter(b => b.tweets.length > 0);
 
-  const filteredPodcasts = filterNew(feedPodcasts?.podcasts || [], seen.videos, 'videoId');
+  const filteredPodcasts = filterNew(feedPodcasts?.podcasts || [], seen.videos, ['videoId', 'url', 'title']);
   const filteredBlogs = filterNew(feedBlogs?.blogs || [], seen.articles, 'url');
 
   // 5. Load prompts with priority: user custom > remote (GitHub) > local default

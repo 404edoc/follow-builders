@@ -540,6 +540,7 @@ Required behavior for `scripts/deliver.js` in this setup:
 - write to `vaultPath/Daily/YYYY-MM-DD.md` directly
 - when rerunning on the same day, replace the existing digest section or rewrite the daily note instead of blindly appending duplicate test/prod blocks
 - verify the written note by reading it back after delivery
+- if you split delivery logic into "append" vs "replace existing section", prefer section replacement for idempotent cron reruns
 
 Formatting rules specific to this user's Obsidian workflow:
 - use a single final digest block per day; never leave both a test block and a formal block in the same note
